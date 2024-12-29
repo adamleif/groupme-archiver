@@ -134,20 +134,15 @@ def fetch_group_messages(args):
             num_total_messages = curr_messages['response']['count']
             num_fetched_messages = 0
             curr_messages = curr_messages['response']['messages']
-            # all_attachments = []
 
             tqdm.write("Fetching %d messages..." % (num_total_messages))
             pbar.total = num_total_messages
 
-            # pbar = tqdm(total=num_total_messages)
-            while not completed: # and num_fetched_messages < 400: # num_total_messages:
-                # if num_fetched_messages >= 300: break
+            while not completed:  
                 sleep(0.35)  # add in a delay to prevent a 429 error
                 num_fetched_messages += len(curr_messages)
                 pbar.update(len(curr_messages))
 
-                # if num_fetched_messages % 240 == 0: 
-                    # sleep(1)
                 if curr_messages[-1]['id'] == last_message_id:
                     completed = True 
                     
@@ -200,17 +195,11 @@ def fetch_group_messages(args):
 
                     r = requests.get(url, params=params)
 
-                    # if r.status_code == 304:
-                        # return 304
                     if not r.content: 
                         completed = True 
                         return 
                     
                     _curr_messages = json.loads(r.content)
-
-                    # if _curr_messages == last_messages:
-                        # completed = True
-                        # return 
 
                     # TODO Check for validity of request
                     try:
@@ -221,8 +210,6 @@ def fetch_group_messages(args):
                         pbar.set_description("")
 
                         return get_message_batch()
-                        # print(json.dumps(curr_messages, indent=4))
-                        # raise e
 
                 curr_messages = get_message_batch() 
 
@@ -311,6 +298,27 @@ def fetch_direct_messages(args):
     return messages, people, group_info, all_attachments
 
 
+def download_attachments(attachments_url_file, output_dir = None): 
+    if not output_dir: 
+        output_dir = "/".join(attachments_url_file.split("/")[:-1])
+    
+    with open(attachments_url_file, encoding='utf-8') as fp:
+        all_attachments = json.load(fp)
+
+    for att_url in tqdm(all_attachments):
+        file_name = att_url.split('/')[-1]
+        att_path = 'attachments/%s.%s' % (file_name, "*")
+        att_full_path = os.path.join(output_dir, att_path)
+        if len(glob.glob(att_full_path)) == 0:
+            r = requests.get(att_url)
+            img_type = r.headers['content-type'].split('/')[1]
+            att_path = 'attachments/%s.%s' % (file_name, img_type)
+            att_full_path = os.path.join(output_dir, att_path)
+
+            with open(att_full_path, 'wb') as fp:
+                fp.write(r.content)
+        
+
 def main():
     parser = argparse.ArgumentParser(description="""GroupMe chats archiver.
         By default, the app will list all of your chats that are currently
@@ -330,17 +338,22 @@ def main():
                         help="Number of messages in each request. Max: 100.")
     parser.add_argument('--output-dir', '-o', dest="output_dir",
                         help="Output directory to store archived content")
-
     parser.add_argument('--save-global-avatars', action='store_true',
                         dest='save_global_avatars',
                         help="Use global avatars instead of " +
                              "chat specific user avatars")
     parser.add_argument('--last-message-id', '-l', dest="last_message_id",
                         help="ID of last message at which to resume/begin archiving")
+    parser.add_argument('--download-attachments', '-a', dest="download_attachments", 
+                        action='store_true', help="Whether all attachments should be downloaded")
+    parser.add_argument('--skip-archive', '-s', dest="skip_archive", 
+                        action='store_true', help="Whether archive process should be skipped" + 
+                        "while only other steps (e.g. attachment downloading) occur")
+    
 
     args = parser.parse_args()
 
-    if not args.group_chat_id and not args.direct_chat_id:
+    if not args.group_chat_id and not args.direct_chat_id and not args.skip_archive:
         print("Group chats")
         print("===========")
         chats = list_groups(args)
@@ -353,100 +366,108 @@ def main():
         chats = list_dms(args)
         table_headers = ["Chat Name", "ID", "Number of messages"]
         print(tabulate(chats, headers=table_headers))
-    else:
-        if args.group_chat_id:
-            messages, people, group_info, all_attachments = \
-                fetch_group_messages(args)
+    else:        
+        if not args.skip_archive:
+            if args.group_chat_id:
+                messages, people, group_info, all_attachments = \
+                    fetch_group_messages(args)
+            else:
+                messages, people, group_info, all_attachments = \
+                    fetch_direct_messages(args)  
+
+            if not output_dir:
+                output_dir = group_info['name']
+                output_dir = output_dir.replace('/', ' ')
+
+            os.makedirs(output_dir, exist_ok=True)
+
+            print("\nFetching avatars...")
+            avatars_path = os.path.join(output_dir, 'avatars/')
+            os.makedirs(avatars_path, exist_ok=True)
+            for k, v in tqdm(people.items()):
+                url = v['avatar_url']
+                if url:
+                    r = requests.get("%s.avatar" % (url))
+                    img_type = r.headers['content-type'].split('/')[1]
+                    avatar_path = os.path.join(avatars_path,
+                                            '%s.avatar.%s' % (k, img_type))
+                    with open(avatar_path, 'wb') as fp:
+                        fp.write(r.content)
+
+            print("\nPeople:")
+            table_headers = {
+                "id": "ID",
+                "name": "Name",
+                "avatar_url": "Avatar URL"
+            }
+            print(tabulate([dict({'id': k}, **v) for (k, v) in people.items()],
+                        headers=table_headers))
+
+            # Save everything
+            contents = os.listdir(output_dir)
+
+            people_fn = "people"
+            messages_fn = "messages"
+            group_info_fn = "group_info"
+
+            ps = len([p for p in contents if "people" in p])
+            ms = len([m for m in contents if "message" in m])
+
+            if ps > 0: people_fn += str(ps)
+            if ms > 0: messages_fn += str(ms) 
+
+            # TODO: handle combining multiples and removing duplicates
+            people_file = os.path.join(output_dir, f"{people_fn}.json")
+            messages_file = os.path.join(output_dir, f"{messages_fn}.json")
+            group_info_file = os.path.join(output_dir, f"{group_info_fn}.json")
+
+            # Save people
+            with open(people_file, 'w', encoding='utf-8') as fp:
+                json.dump(people, fp, ensure_ascii=False, indent=2)
+
+            # Save messages
+            with open(messages_file, 'w', encoding='utf-8') as fp:
+                messages = list(reversed(messages))
+                json.dump(messages, fp, ensure_ascii=False, indent=2)
+
+            # Save group information
+            with open(group_info_file, 'w', encoding='utf-8') as fp:
+                json.dump(group_info, fp, ensure_ascii=False, indent=2)
+
+            print("\nFetching attachments...")
+            attachments_path = os.path.join(output_dir, 'attachments/')
+            os.makedirs(attachments_path, exist_ok=True)
+
+            all_attachments_fn = "attachments_urls"
+            aS = len([a for a in os.listdir(attachments_path) if "attachments_urls" in a])
+               
+            if aS: all_attachments_fn += str(aS)
+
+            # as a storage solution, rather than initially downloading all attachments,
+            # just store a text file with them instead for later downloading
+            all_attachments_file = os.path.join(attachments_path, f"{all_attachments_fn}.json")            
+            with open(all_attachments_file, 'w', encoding='utf-8') as fp:                
+                json.dump(all_attachments, fp, ensure_ascii=False, indent=2)
         else:
-            messages, people, group_info, all_attachments = \
-                fetch_direct_messages(args)
+            params = {
+                'token': args.token
+                }
+            url = 'https://api.groupme.com/v3/groups/%s' % (args.group_chat_id)
+    
+            r = requests.get(url, params=params)
+            response = json.loads(r.content)['response']
 
-        output_dir = args.output_dir
-        if not output_dir:
-            output_dir = group_info['name']
-            output_dir = output_dir.replace('/', ' ')
+            group_name = response['name']  
 
-        os.makedirs(output_dir, exist_ok=True)
+            if not args.output_dir:
+                output_dir = group_name
+                output_dir = output_dir.replace('/', ' ')
 
-        print("\nFetching avatars...")
-        avatars_path = os.path.join(output_dir, 'avatars/')
-        os.makedirs(avatars_path, exist_ok=True)
-        for k, v in tqdm(people.items()):
-            url = v['avatar_url']
-            if url:
-                r = requests.get("%s.avatar" % (url))
-                img_type = r.headers['content-type'].split('/')[1]
-                avatar_path = os.path.join(avatars_path,
-                                           '%s.avatar.%s' % (k, img_type))
-                with open(avatar_path, 'wb') as fp:
-                    fp.write(r.content)
+            attachments_path = os.path.join(output_dir, 'attachments/')
+            all_attachments_file = os.path.join(attachments_path, f"attachments_urls.json")            
 
-        print("\nPeople:")
-        table_headers = {
-            "id": "ID",
-            "name": "Name",
-            "avatar_url": "Avatar URL"
-        }
-        print(tabulate([dict({'id': k}, **v) for (k, v) in people.items()],
-                       headers=table_headers))
-
-        # Save everything
-        contents = os.listdir(output_dir)
-
-        people_fn = "people"
-        messages_fn = "messages"
-        group_info_fn = "group_info"
-
-        ps = len([p for p in contents if "people" in p])
-        ms = len([m for m in contents if "message" in m])
-
-        if ps > 0: people_fn += str(ps)
-        if ms > 0: messages_fn += str(ms) 
-
-        people_file = os.path.join(output_dir, f"{people_fn}.json")
-        messages_file = os.path.join(output_dir, f"{messages_fn}.json")
-        group_info_file = os.path.join(output_dir, f"{group_info_fn}.json")
-
-        # Save people
-        with open(people_file, 'w', encoding='utf-8') as fp:
-            json.dump(people, fp, ensure_ascii=False, indent=2)
-
-        # Save messages
-        with open(messages_file, 'w', encoding='utf-8') as fp:
-            messages = list(reversed(messages))
-            json.dump(messages, fp, ensure_ascii=False, indent=2)
-
-        # Save group information
-        with open(group_info_file, 'w', encoding='utf-8') as fp:
-            json.dump(group_info, fp, ensure_ascii=False, indent=2)
-
-        print("\nFetching attachments...")
-        attachments_path = os.path.join(output_dir, 'attachments/')
-        os.makedirs(attachments_path, exist_ok=True)
-
-        all_attachments_fn = "attachments_urls"
-        aS = len([a for a in os.listdir(attachments_path) if "attachments_urls" in a])
-
-        if aS: all_attachments_fn += str(aS)
-
-        all_attachments_file = os.path.join(attachments_path, f"{all_attachments_fn}.json")
-        with open(all_attachments_file, 'w', encoding='utf-8') as fp:
-            json.dump(all_attachments, fp, ensure_ascii=False, indent=2)
-
-        """
-        for att_url in tqdm(all_attachments):
-            file_name = att_url.split('/')[-1]
-            att_path = 'attachments/%s.%s' % (file_name, "*")
-            att_full_path = os.path.join(output_dir, att_path)
-            if len(glob.glob(att_full_path)) == 0:
-                r = requests.get(att_url)
-                img_type = r.headers['content-type'].split('/')[1]
-                att_path = 'attachments/%s.%s' % (file_name, img_type)
-                att_full_path = os.path.join(output_dir, att_path)
-
-                with open(att_full_path, 'wb') as fp:
-                    fp.write(r.content)
-        """
+        if args.download_attachments:
+            download_attachments(all_attachments_file, output_dir=output_dir)
 
 if __name__ == '__main__':
     main()

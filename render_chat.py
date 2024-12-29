@@ -196,9 +196,12 @@ def render_avatar(input_dir, page_elements, people, message):
     avatar_url = people[message['author']]['avatar_url']
     if avatar_url:
         avatar_path = "%s.avatar" % (message['author'])
-        avatar_path = os.path.join('avatars', avatar_path)
-        avatar_path = glob.glob("%s/%s*" % (input_dir, avatar_path))[0]
-        avatar_path = "/".join(avatar_path.split('/')[-2:])
+        # print(avatar_path)
+        avatar_path = os.path.join('avatars', avatar_path).replace("\\","/")
+        # print(avatar_path)
+        avatar_path = glob.glob("%s/%s*" % (input_dir, avatar_path))[0].replace("\\","/")
+        # print(avatar_path)
+        avatar_path = "/".join(avatar_path.split('/')[-2:]).replace("\\","/")
         doc.asis('<img src="%s"></img>' % (avatar_path))
     else:
         names = people[message['author']]['name'].split()
@@ -225,27 +228,16 @@ def render_message(input_dir, page_elements, people, message, timezone=None):
         with tag('div', klass='message_box'):
             with tag('span', klass='user'):
                 text(people[message['author']]['name'])
-            """if len(message['attachments']) > 0:
+            if len(message['attachments']) > 0:
+                if not message['text']:
+                    message['text'] = ""
+                else: 
+                    message['text'] += "\n"
+
                 for att in message['attachments']:
-                    if att['type'] == 'image' or \
-                       att['type'] == 'linked_image':
-                        image_path = att['url'].split('/')[-1]
-                        image_path = os.path.join('attachments', image_path)
-                        r = glob.glob("%s/%s*" % (input_dir, image_path))
-                        image_path = r[0]
-                        image_path = "/".join(image_path.split('/')[-2:])
-                        with tag('span', klass='message'):
-                            doc.asis('<img src="%s"></img>' % (
-                                image_path))
-                    elif att['type'] == 'video':
-                        video_path = att['url'].split('/')[-1]
-                        video_path = os.path.join('attachments', video_path)
-                        r = glob.glob("%s/%s*" % (input_dir, video_path))[0]
-                        video_path = r
-                        video_path = "/".join(video_path.split('/')[-2:])
-                        with tag('span', klass='message'):
-                            doc.asis('<video src="%s" controls></video>' % (
-                                video_path))"""
+                    if 'url' in att:
+                        message['text'] += f"{att['url']}, \n"
+                    
             if message['text']:
                 with tag('span', klass='message'):
                     _text = message['text']
@@ -307,8 +299,6 @@ def main():
 
     with open(os.path.join(args.input_dir, 'people.json'), encoding='utf-8') as fp:
         people = json.load(fp)
-
-    print(people)
 
     with open(os.path.join(args.input_dir, 'messages.json'), encoding='utf-8') as fp:
         messages = json.load(fp)
