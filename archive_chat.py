@@ -5,6 +5,7 @@ import os
 import requests
 import sys
 from tqdm import tqdm
+from time import sleep 
 
 from tabulate import tabulate
 
@@ -71,11 +72,13 @@ def fetch_group_messages(args):
         'token': args.token
     }
     url = 'https://api.groupme.com/v3/groups/%s' % (args.group_chat_id)
+    
     r = requests.get(url, params=params)
 
     people = {}
     messages = []
     group_info = {}
+    all_attachments = []
 
     response = json.loads(r.content)['response']
 
@@ -91,70 +94,148 @@ def fetch_group_messages(args):
         else:
             people[member['user_id']]['avatar_url'] = None
 
-    url = 'https://api.groupme.com/v3/groups/%s/messages' % (
-           args.group_chat_id)
-    r = requests.get(url, params=params)
+    last_message_id = args.last_message_id
+    earliest_time = sys.maxsize
 
-    curr_messages = json.loads(r.content)
+    pbar = tqdm() 
+    completed = False
 
-    # TODO Check for validity of request
-    num_total_messages = curr_messages['response']['count']
-    num_fetched_messages = 0
-    curr_messages = curr_messages['response']['messages']
-    all_attachments = []
+    def get_messages():
+        try:
+            nonlocal params 
+            nonlocal people 
+            nonlocal messages 
+            nonlocal group_info 
+            nonlocal all_attachments
+            nonlocal last_message_id 
+            nonlocal earliest_time
+            nonlocal pbar 
+            nonlocal completed 
 
-    print("Fetching %d messages..." % (num_total_messages))
-    pbar = tqdm(total=num_total_messages)
-    while num_fetched_messages < num_total_messages:
-        num_fetched_messages += len(curr_messages)
-        pbar.update(len(curr_messages))
-        for message in curr_messages:
-            if message['sender_id'] not in people:
-                people[message['sender_id']] = {
-                    'name': message['name'],
-                    'avatar_url': message['avatar_url']
-                }
-            if not args.save_global_avatars and \
-               people[message['sender_id']]['avatar_url'] is None:
-                people[message['sender_id']]['avatar_url'] = \
-                    message['avatar_url']
+            if last_message_id:
+                pbar.write(f"Starting from last_message_id: {last_message_id}")
+                params = {
+                        'token': args.token,
+                        'before_id': last_message_id,
+                        'limit': args.num_messages_per_request
+                    }
+                earliest_time = last_message_id[:10]  # pull the UNIX timestamp from the id
+            
+            url = 'https://api.groupme.com/v3/groups/%s/messages' % (
+                args.group_chat_id)
+            r = requests.get(url, params=params)
 
-            for att in message['attachments']:
-                if att['type'] == 'image' or \
-                   att['type'] == 'video' or \
-                   att['type'] == 'linked_image':
-                    all_attachments.append(att['url'])
-            # print("[%s] %s : %s" % (
-            #    message['created_at'], message['name'], message['text']))
-            messages.append({
-                'author': message['sender_id'],
-                'created_at': message['created_at'],
-                'text': message['text'],
-                'favorited_by': message['favorited_by'],
-                'attachments': message['attachments']
-            })
-        last_message_id = curr_messages[-1]['id']
+            if not r.content: 
+                return messages, people, group_info, all_attachments
+            
+            curr_messages = json.loads(r.content)
 
-        params = {
-            'token': args.token,
-            'before_id': last_message_id,
-            'limit': args.num_messages_per_request
-        }
-        url = 'https://api.groupme.com/v3/groups/%s/messages' % (
-               args.group_chat_id)
-        r = requests.get(url, params=params)
+            # TODO Check for validity of request
+            num_total_messages = curr_messages['response']['count']
+            num_fetched_messages = 0
+            curr_messages = curr_messages['response']['messages']
+            # all_attachments = []
 
-        if r.status_code == 304:
-            break
-        curr_messages = json.loads(r.content)
+            tqdm.write("Fetching %d messages..." % (num_total_messages))
+            pbar.total = num_total_messages
 
-        # TODO Check for validity of request
-        curr_messages = curr_messages['response']['messages']
+            # pbar = tqdm(total=num_total_messages)
+            while not completed: # and num_fetched_messages < 400: # num_total_messages:
+                # if num_fetched_messages >= 300: break
+                sleep(0.35)  # add in a delay to prevent a 429 error
+                num_fetched_messages += len(curr_messages)
+                pbar.update(len(curr_messages))
 
-    pbar.close()
-    messages = list(reversed(messages))
+                # if num_fetched_messages % 240 == 0: 
+                    # sleep(1)
+                if curr_messages[-1]['id'] == last_message_id:
+                    completed = True 
+                    
+                for message in curr_messages:
+                    if message['sender_id'] not in people:
+                        people[message['sender_id']] = {
+                            'name': message['name'],
+                            'avatar_url': message['avatar_url']
+                        }
+                    if not args.save_global_avatars and \
+                    people[message['sender_id']]['avatar_url'] is None:
+                        people[message['sender_id']]['avatar_url'] = \
+                            message['avatar_url']
 
-    return messages, people, group_info, all_attachments
+                    for att in message['attachments']:
+                        if att['type'] == 'image' or \
+                        att['type'] == 'video' or \
+                        att['type'] == 'linked_image':
+                            all_attachments.append(att['url'])
+                    # print("[%s] %s : %s" % (
+                    #    message['created_at'], message['name'], message['text']))
+                    m = {
+                        'id': message['id'],
+                        'author': message['sender_id'],
+                        'created_at': message['created_at'],
+                        'text': message['text'],
+                        'favorited_by': message['favorited_by'],
+                        'attachments': message['attachments']
+                    }
+
+                    m_time = m['created_at']
+                    if m not in messages[-100:0] and not m_time >= earliest_time:
+                        messages.append(m)
+                        earliest_time = m_time
+                    elif m_time < earliest_time:  # if it was in messages but is somehow still the earliest
+                        earliest_time = m_time
+                    
+                last_message_id = curr_messages[-1]['id']
+
+                params = {
+                        'token': args.token,
+                        'before_id': last_message_id,  # 
+                        'limit': args.num_messages_per_request
+                    }
+                url = 'https://api.groupme.com/v3/groups/%s/messages' % (
+                    args.group_chat_id)
+                
+                def get_message_batch():
+                    nonlocal completed 
+
+                    r = requests.get(url, params=params)
+
+                    # if r.status_code == 304:
+                        # return 304
+                    if not r.content: 
+                        completed = True 
+                        return 
+                    
+                    _curr_messages = json.loads(r.content)
+
+                    # if _curr_messages == last_messages:
+                        # completed = True
+                        # return 
+
+                    # TODO Check for validity of request
+                    try:
+                        return _curr_messages['response']['messages']
+                    except Exception as e:
+                        pbar.set_description("Request error, sleeping for 30 seconds") 
+                        sleep(30)
+                        pbar.set_description("")
+
+                        return get_message_batch()
+                        # print(json.dumps(curr_messages, indent=4))
+                        # raise e
+
+                curr_messages = get_message_batch() 
+
+            pbar.close()
+
+            return messages, people, group_info, all_attachments
+        except KeyboardInterrupt as e:
+            raise e
+        except Exception as e:
+            tqdm.write(f"Ran into an issue:\n{e}\n; resuming from {last_message_id}")
+            return get_messages()
+        
+    return get_messages()
 
 
 def fetch_direct_messages(args):
@@ -254,6 +335,8 @@ def main():
                         dest='save_global_avatars',
                         help="Use global avatars instead of " +
                              "chat specific user avatars")
+    parser.add_argument('--last-message-id', '-l', dest="last_message_id",
+                        help="ID of last message at which to resume/begin archiving")
 
     args = parser.parse_args()
 
@@ -298,9 +381,59 @@ def main():
                 with open(avatar_path, 'wb') as fp:
                     fp.write(r.content)
 
+        print("\nPeople:")
+        table_headers = {
+            "id": "ID",
+            "name": "Name",
+            "avatar_url": "Avatar URL"
+        }
+        print(tabulate([dict({'id': k}, **v) for (k, v) in people.items()],
+                       headers=table_headers))
+
+        # Save everything
+        contents = os.listdir(output_dir)
+
+        people_fn = "people"
+        messages_fn = "messages"
+        group_info_fn = "group_info"
+
+        ps = len([p for p in contents if "people" in p])
+        ms = len([m for m in contents if "message" in m])
+
+        if ps > 0: people_fn += str(ps)
+        if ms > 0: messages_fn += str(ms) 
+
+        people_file = os.path.join(output_dir, f"{people_fn}.json")
+        messages_file = os.path.join(output_dir, f"{messages_fn}.json")
+        group_info_file = os.path.join(output_dir, f"{group_info_fn}.json")
+
+        # Save people
+        with open(people_file, 'w', encoding='utf-8') as fp:
+            json.dump(people, fp, ensure_ascii=False, indent=2)
+
+        # Save messages
+        with open(messages_file, 'w', encoding='utf-8') as fp:
+            messages = list(reversed(messages))
+            json.dump(messages, fp, ensure_ascii=False, indent=2)
+
+        # Save group information
+        with open(group_info_file, 'w', encoding='utf-8') as fp:
+            json.dump(group_info, fp, ensure_ascii=False, indent=2)
+
         print("\nFetching attachments...")
         attachments_path = os.path.join(output_dir, 'attachments/')
         os.makedirs(attachments_path, exist_ok=True)
+
+        all_attachments_fn = "attachments_urls"
+        aS = len([a for a in os.listdir(attachments_path) if "attachments_urls" in a])
+
+        if aS: all_attachments_fn += str(aS)
+
+        all_attachments_file = os.path.join(attachments_path, f"{all_attachments_fn}.json")
+        with open(all_attachments_file, 'w', encoding='utf-8') as fp:
+            json.dump(all_attachments, fp, ensure_ascii=False, indent=2)
+
+        """
         for att_url in tqdm(all_attachments):
             file_name = att_url.split('/')[-1]
             att_path = 'attachments/%s.%s' % (file_name, "*")
@@ -313,33 +446,7 @@ def main():
 
                 with open(att_full_path, 'wb') as fp:
                     fp.write(r.content)
-
-        print("\nPeople:")
-        table_headers = {
-            "id": "ID",
-            "name": "Name",
-            "avatar_url": "Avatar URL"
-        }
-        print(tabulate([dict({'id': k}, **v) for (k, v) in people.items()],
-                       headers=table_headers))
-
-        # Save everything
-        people_file = os.path.join(output_dir, "people.json")
-        messages_file = os.path.join(output_dir, "messages.json")
-        group_info_file = os.path.join(output_dir, "group_info.json")
-
-        # Save people
-        with open(people_file, 'w', encoding='utf-8') as fp:
-            json.dump(people, fp, ensure_ascii=False, indent=2)
-
-        # Save messages
-        with open(messages_file, 'w', encoding='utf-8') as fp:
-            json.dump(messages, fp, ensure_ascii=False, indent=2)
-
-        # Save group information
-        with open(group_info_file, 'w', encoding='utf-8') as fp:
-            json.dump(group_info, fp, ensure_ascii=False, indent=2)
-
+        """
 
 if __name__ == '__main__':
     main()
